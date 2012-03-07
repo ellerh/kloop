@@ -160,8 +160,7 @@
   (make-testnode while ctx finally?))
 
 (define (temp name) 
-  (datum->syntax #'temp 
-		 (syntax->datum (car (generate-temporaries (list name))))))
+  (car (generate-temporaries (list name))))
 
 (define (constant? x)
   (syntax-case x (quote)
@@ -1009,8 +1008,8 @@
 		#`(#,(ctx-cont ctx) #,(result-form ctx))))))
       (let-syntax ((#,(ctx-finish ctx)
 		    (syntax-rules ()
-		      ((_) 
-		       (#,(ctx-epilog ctx) #,@(ctx-vars ctx))))))
+		      ((_) (#,(ctx-epilog ctx) #,@(ctx-vars ctx))))))
+	
 	#,body)))
 
 (define (simple-loop form)
