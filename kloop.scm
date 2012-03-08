@@ -20,6 +20,9 @@
 		  fsrc)))
     (error (format "Invalid syntax in ~a: ~a ~a" in message src))))
 
+(define (r6rs-error who msg . irritants)
+  (apply error who msg irritants))
+
 (define-syntax assert 
   (syntax-rules ()
     ((_ exp) (unless exp (error "assertion failed" 'exp)))))
