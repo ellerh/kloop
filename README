@@ -1,1 +1,24 @@
 kloop is a CL-style loop macro for Kawa and R6RS.
+
+Installation
+ 
+  1. Use the Makefile to build kloop.jar
+  2. Start Kawa so that kloop.jar is in the classpath
+  3. Use (import (kloop)) to import the loop macro
+
+Documentation
+
+  The CLHS describes what the loop macro should do:
+    http://www.lispworks.com/documentation/HyperSpec/Body/06_.htm
+
+  All features should work as described in the spec with the following
+  exceptions:
+    - Scheme has no packages so for-as-package is not implemented 
+    - this version uses #f in situations where CL uses 'nil  
+    - loop-finish does currently not work correctly
+
+License
+
+  My own code is placed in the public domain.
+  The file kloop-r6rs/testing.sls has a BSD-style license but it's not
+  included the jar file.
