@@ -1,5 +1,5 @@
 
-(import (kloop))
+(import (only (kloop) loop gvref glength))
 
 (import (rnrs lists)
 	(rnrs hashtables)

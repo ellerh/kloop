@@ -114,7 +114,7 @@
 ;; well use mutation during expansion time.  setf/push/pop make life
 ;; quite a bit easier.
 
-(defsyncase kloop-setf (form)
+(defsyncase setf (form)
   ((id (reader obj args ...) value)
    (let ((writer (string->symbol
 		  (string-append (symbol->string (syntax->datum #'reader))
@@ -126,7 +126,7 @@
 (defsynrules push ()
   ((_ val (reader obj))
    (let ((o obj))
-     (kloop-setf (reader o) (cons val (reader o)))))
+     (setf (reader o) (cons val (reader o)))))
   ((_ val var)
    (set! var (cons val var))))
 
@@ -134,7 +134,7 @@
   ((_ (reader obj))
    (let* ((o obj)
 	  (list (reader o)))
-     (kloop-setf (reader o) (cdr list))
+     (setf (reader o) (cdr list))
      (car list)))
   ((id val var)
    (let ((list var))
@@ -147,7 +147,7 @@
   ((_ prefix (reader obj))
    (let* ((p prefix)
 	  (o obj))
-     (kloop-setf (reader o) (append p (reader o))))))
+     (setf (reader o) (append p (reader o))))))
 
 ;; The ctx packs up the different parts of the loop.
 (defstruct ctx 
