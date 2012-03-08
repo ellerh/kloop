@@ -21,7 +21,7 @@
 ;; heap-allocated locations and it would be inefficient. Variables
 ;; that are never set! can be stack allocated.)
 ;;
-;; In a first step input is transformed into a simple IR.  The IR
+;; In a first step, input is transformed into a simple IR.  The IR
 ;; consists of multiple "segments" that correspond to the above code;
 ;; one segment binds the WITH-variables one segments initializes
 ;; iteration-variables and so on.  Each segment is a list of
@@ -34,7 +34,17 @@
 ;; In the second step, the IR segments are then converted to output
 ;; expression.
 ;;
+;; Many of the parsing functions here are named like the clauses in
+;; the spec[*].  Those parse the input and generate IR as side effect.
+;;
+;; [*] http://www.lispworks.com/documentation/HyperSpec/Body/m_loop.htm
+;;
 
+
+;;; Code
+
+
+
 ;; The Scheme world can't agree on a syntax to define structs, oops,
 ;; records.  So everybody needs to re-invent the wheel.
 (define-syntax defstruct
@@ -139,30 +149,13 @@
 	  (o obj))
      (kloop-setf (reader o) (append p (reader o))))))
 
-;; Argument evaluation order is unspecified in Scheme. Very useful
-;; feature, NOT!
-
-;; call a function; evaluate arguments left-to-right
-(define-syntax lr
-  (syntax-rules ()
-    ((lr (fun args ...))
-     (lr-aux fun (args ...) ()))))
-
-(define-syntax lr-aux
-  (syntax-rules ()
-    ((_ f () (tmps ...))
-     (f tmps ...))
-    ((_ f (x y ...) (tmps ...))
-     (let ((tmp x))
-       (lr-aux f (y ...) (tmps ... tmp))))))
-
-;; In the ctx packs up the different parts of the loop.
+;; The ctx packs up the different parts of the loop.
 (defstruct ctx 
   src	    ; the input source form (not modified)
   id 	    ; the identifier of the macro (i.e. 'loop)
   forms     ; the list of input forms (modified during parsing)
   cont 	    ; the identifier of the return continuation
-  name 	    ; if we have named-clause this is the name; #f otherwise
+  name 	    ; if we have a named-clause this is the name; #f otherwise
   finish    ; the identifier for the 'finish-loop macro
   epilog    ; the identifier for the epilogue lambda
   finally   ; segment for finally forms
@@ -171,7 +164,7 @@
   vars 	    ; list of identifiers that are rebound on each iteration
   neck 	    ; segment before body (currently not used)
   body 	    ; segment of the loop body
-  tail 	    ; segment that rebinds 
+  tail 	    ; segment that binds loop vars for the next iteration
   accus	    ; alist of accumulators
   )
 
@@ -842,13 +835,14 @@
    (#t #f)))
 
 (define (list-accumulation ctx)
-  (token-case
-   ((collect collecting)
-    (lr (collect-clause ctx (form) (maybe-into ctx))))
-   ((append appending)
-    (lr (append-clause ctx (form) (maybe-into ctx))))
-   ((nconc nconcing)
-    (lr (nconc-clause ctx (form) (maybe-into ctx))))))
+  (let ((frob (lambda (fun)
+		(let* ((form (form))
+		       (name (maybe-into ctx)))
+		  (fun ctx form name)))))
+    (token-case
+     ((collect collecting) (frob collect-clause))
+     ((append appending) (frob append-clause))
+     ((nconc nconcing) (frob nconc-clause)))))
 
 (define (numeric-accumulation ctx)
   (let ((frob (lambda (fun)
