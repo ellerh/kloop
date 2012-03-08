@@ -1,4 +1,42 @@
+;;; kloop-expand.scm --- the expander function for the loop macro
+;;
+;; This file was written by Helmut Eller and has been placed in the
+;; public domain.
+;;
+;;;
+;;
+;; The macro produces essentially output that looks so:
+;;
+;;  (let (<with-bindings>)
+;;    (let (<initialze iteration-variales>)
+;;      (let loop (<iteration-variales>)
+;;        (let ((finish (lambda (<iteration-variales>) <finally-code>)))
+;;          <body>
+;;          (let (<bind iteration-variales to next value>)
+;;            (if <end-test> (finish <iteration-variales>))
+;;            (loop <iteration-variales>)))))
+;;
+;; Note that we don't use set! to update iteration-variables; instead
+;; the variables are rebound. (Due to call/cc, set! requires
+;; heap-allocated locations and it would be inefficient. Variables
+;; that are never set! can be stack allocated.)
+;;
+;; In a first step input is transformed into a simple IR.  The IR
+;; consists of multiple "segments" that correspond to the above code;
+;; one segment binds the WITH-variables one segments initializes
+;; iteration-variables and so on.  Each segment is a list of
+;; "nodes". There are 4 kinds of nodes: bind, stmt, if-node, and
+;; test-nodes.  Bind-nodes bind variables like let; stmt-nodes are
+;; used for side effects e.g. do-clauses; if-nodes are used to
+;; represent if-clauses; test-nodes are used to handle termination
+;; tests.
+;;
+;; In the second step, the IR segments are then converted to output
+;; expression.
+;;
 
+;; The Scheme world can't agree on a syntax to define structs, oops,
+;; records.  So everybody needs to re-invent the wheel.
 (define-syntax defstruct
   (lambda (form)
     (define (to-string x)
@@ -23,7 +61,10 @@
 	      (constructor (stxconc 'make- #'name))
 	      (predicate (stxconc #'name '?))
 	      (check #`(or (#,predicate name)
-			   (error "type-check failed" 'name name))))
+			   (r6rs-error 'check-struct-type
+				       #,(string-append "expected type: "
+							(to-string #'name))
+				       name))))
 	 #`(begin
 	     (define (#,constructor . #,slot-names)
 	       (vector 'name #,@slot-names))
@@ -59,6 +100,10 @@
      (lambda (arg)
        (syntax-case arg (literals ...) clauses ...)))))
 
+;; As I'm heretic enough to implement loop in Scheme I can just as
+;; well use mutation during expansion time.  setf/push/pop make life
+;; quite a bit easier.
+
 (defsyncase kloop-setf (form)
   ((id (reader obj args ...) value)
    (let ((writer (string->symbol
@@ -86,11 +131,16 @@
      (set! var (cdr list))
      (car list))))
 
+;; appendf is similar to push, but instead of pushing a single value
+;; we push a list of values to a place.
 (defsynrules appendf ()
   ((_ prefix (reader obj))
    (let* ((p prefix)
 	  (o obj))
      (kloop-setf (reader o) (append p (reader o))))))
+
+;; Argument evaluation order is unspecified in Scheme. Very useful
+;; feature, NOT!
 
 ;; call a function; evaluate arguments left-to-right
 (define-syntax lr
@@ -106,9 +156,29 @@
      (let ((tmp x))
        (lr-aux f (y ...) (tmps ... tmp))))))
 
-(defstruct ctx src id forms cont name finish epilog finally
-  with head vars neck body tail steps accus)
+;; In the ctx packs up the different parts of the loop.
+(defstruct ctx 
+  src	    ; the input source form (not modified)
+  id 	    ; the identifier of the macro (i.e. 'loop)
+  forms     ; the list of input forms (modified during parsing)
+  cont 	    ; the identifier of the return continuation
+  name 	    ; if we have named-clause this is the name; #f otherwise
+  finish    ; the identifier for the 'finish-loop macro
+  epilog    ; the identifier for the epilogue lambda
+  finally   ; segment for finally forms
+  with 	    ; segment to setup initialize accumulators etc.
+  head 	    ; segment before the loop
+  vars 	    ; list of identifiers that are rebound on each iteration
+  neck 	    ; segment before body (currently not used)
+  body 	    ; segment of the loop body
+  tail 	    ; segment that rebinds 
+  accus	    ; alist of accumulators
+  )
+
+;; helper struct to parse for-as-arithmetic clauses
 (defstruct range ctx var type init limit test step by)
+
+;; The IR nodes:
 (defstruct bind vars vals)
 (defstruct stmt form)
 (defstruct ifnode test true false vars it)
@@ -122,11 +192,32 @@
 (define (ctx-pop-form ctx)
   (pop (ctx-forms ctx)))
 
+;; Return the next input form.  (Implicitly accesses variable 'ctx.)
 (defsyncase form (exp)
   ((id)
    (let ((ctx-id (datum->syntax #'id 'ctx)))
      #`(ctx-pop-form #,ctx-id))))
 
+
+;; Dispatch on the next input token. Implicitly accesses variable 'ctx.
+;; Used like so:
+;; (token-case
+;;  ((a) a-case)        ; selected if token is 'a
+;;  ((b c) b-c-case)    ; selected if token is 'b or 'c
+;;  ((#f x y) x-y-case) ; selected if token is 'x or 'y doesn't consume input
+;;  (#t else)           ; selected if nothing else matches
+;; 
+(defsyncase token-case (form)
+  ((id)
+   (let ((ctx-id (datum->syntax #'id 'ctx)))
+     #`(loop-error #,ctx-id "invalid token")))
+  ((id ((token0 tokens ...) body ...) clauses ...)
+   #`(if (#,(datum->syntax #'id 'token) token0 tokens ...)
+	 (begin (values) body ...)
+	 (id clauses ...)))
+  ((_ (#t body ...)) #'(begin (values) body ...)))
+
+;; helper macro
 (defsyncase token (form)
   ((some-id drop? token0 tokens ...) (boolean? (syntax->datum #'drop?))
    (let ((ctx-id (datum->syntax #'some-id 'ctx)))
@@ -140,28 +231,24 @@
 	 (_ #f))))
   ((some-id tokens ...) #'(some-id #t tokens ...)))
 
-(defsyncase token-case (form)
-  ((id)
-   (let ((ctx-id (datum->syntax #'id 'ctx)))
-     #`(loop-error #,ctx-id "invalid token")))
-  ((id ((token0 tokens ...) body ...) clauses ...)
-   #`(if (#,(datum->syntax #'id 'token) token0 tokens ...)
-	 (begin (values) body ...)
-	 (id clauses ...)))
-  ((_ (#t body ...)) #'(begin (values) body ...)))
 
+;; Create a bind-node for a single variable.
 (define (bind1 var val)
   (make-bind (list var) (list val)))
 
+;; Craete a stmt node.
 (define (stmt form)
   (make-stmt form))
 
+;; Craete a stmt node.
 (define (make-test ctx while finally?)
   (make-testnode while ctx finally?))
 
+;; Create a temporary identifier. NAME is a hint for debugging.
 (define (temp name) 
   (car (generate-temporaries (list name))))
 
+;; Is X a constant?
 (define (constant? x)
   (syntax-case x (quote)
     ((quote _) #t)
@@ -171,6 +258,7 @@
      (let ((x (syntax->datum #'x)))
        (or (number? x) (string? x) (char? x) (boolean? x) (vector? x))))))
 
+;; Return a temporary for FORM, if if it's constant FORM itself.
 (define (maybe-temp ctx form name)
   (cond ((constant? form)
 	 form)
@@ -178,6 +266,12 @@
 	 (let ((tmp (temp name)))
 	   (push (bind1 tmp form) (ctx-head ctx))
 	   tmp))))
+
+
+;;; for-as-arithmetic
+
+;; The from/to/by parts must be evaluated in the order as in the source.
+;; So the initialization often create temporaries.
 
 (define (range-error range msg form)
   (loop-error (range-ctx range) msg form))
@@ -263,10 +357,14 @@
        (#t (set! done #t))))
     (emit-arithmetic ctx range)))
 
+
+;; Join to bind-nodes to one big bind-node.
 (define (join-binds bind1 bind2)
   (make-bind (append (bind-vars bind1) (bind-vars bind2))
 	     (append (bind-vals bind1) (bind-vals bind2))))
 
+;; Generate for destructuring-bind.  Return 2 values: a segment that
+;; binds auxiliary variables and as second value the final bind-node.
 (define (d-bind var val)
   (syntax-case var ()
     (simple-var (identifier? var)
@@ -290,6 +388,8 @@
 							      (cdr #,val)))))
 		  (values (append tmps2 tmps1 tmp0)
 			  (join-binds bind1 bind2)))))))))))
+
+
 
 (define (for-as-in-list ctx var type)
   (let* ((init (token-case
@@ -377,6 +477,7 @@
 		 (appendf tmps (ctx-tail ctx))
 		 bind)))))))
 
+;; This could probably written more elegantly.
 (define (for-hash ctx htab key ktype val vtype)
   (cond ((not val)
 	 (let ((vec (temp 'hashkeys))
@@ -505,6 +606,10 @@
       (appendf (bind-vars bind) (ctx-vars ctx))
       (push bind (ctx-tail ctx))))))
 
+
+;; with-clauses can create variables with no initialization form. For those
+;; we need to choose some default value.
+
 (define (default-value-for-type type)
   (syntax-case type ()
     (#f #f)
@@ -513,7 +618,8 @@
 	    (case name
 	      ((fixnum integer) 0)
 	      ((float) 0.0)
-	      (else (error type "Unknown type name" name)))))))
+	      (else (r6rs-error 'default-value-for-type
+				"Unknown type name" name)))))))
 
 (define (default-value var type)
   (let ((car-type (lambda (x)
@@ -549,6 +655,9 @@
        ((and) (loop (join-binds bind (with ctx))))
        (#t (push bind (ctx-head ctx)) #f)))))
 
+
+
+;; Is FORM a compound form?
 (define (compound? form)
   (syntax-case form ()
     ((x . y) #t)
@@ -559,6 +668,7 @@
     ((car  . _) (compound? #'car)
      (form))))
 
+;; Return the all the compound forms.
 (define (compound+ ctx)
   (let ((first (compound-form ctx)))
     (cons first
@@ -599,6 +709,23 @@
    ((do doing) (do-clause ctx))
    ((return) (return-clause ctx (form)))))
 
+
+;; Info about accumulators are store ctx-accus slot.  It is an alist
+;; that maps names to accu structs.  #f is used to refer to the
+;; default accu.
+
+;; We use tail-concing for collect and friends.
+(defstruct list-accu head tail result)
+
+;; Numbers are accumulated into single variable.  For some cases
+;; (e.g. maximize) we create an additional variable that indicates
+;; whether the accu was initialized or not.
+(defstruct num-accu var flag)
+
+;; bool-accus are used for thereis/always/never.
+(defstruct bool-accu var)
+
+;; Find the accu with name NAME.
 (define (get-accu ctx name)
   (let* ((test (lambda (key)
 		 (cond ((eq? key name))
@@ -607,14 +734,12 @@
 	 (probe (assp test (ctx-accus ctx))))
     (if probe (cdr probe) #f)))
 
+;; Associate the accu ACCU with name NAME.
 (define (put-accu ctx name accu)
   (assert (not (get-accu ctx name)))
   (push (cons name accu) (ctx-accus ctx)))
 
-(defstruct list-accu head tail result)
-(defstruct num-accu var flag)
-(defstruct bool-accu var)
-
+;; Get or create a list-accu for NAME.
 (define (get-list-accu ctx name)
   (let ((accu (get-accu ctx name)))
     (cond ((not accu)
@@ -633,6 +758,7 @@
 	  ((list-accu? accu) accu)
 	  (#t (loop-error ctx "conflicting accumulation clause")))))
 
+;; Get or create a num-accu for NAME.
 (define (get-num-accu ctx name needs-flag?)
   (let ((accu (get-accu ctx name)))
     (cond ((not accu)
@@ -648,6 +774,7 @@
 	  ((num-accu? accu) accu)
 	  (#t (loop-error ctx "conflicting accumulation clause")))))
 
+;; Get or create a bool-accul.  Bool-accus are never named.
 (define (get-bool-accu ctx init)
   (let ((accu (get-accu ctx #f)))
     (cond ((not accu)
@@ -756,12 +883,16 @@
    ((#f do doing)
     (unconditional ctx))))
 
-
+;; Macro to dispatch on predicates.  E.g.
+;; (fcase <value>
+;;  (integer? x) ; selected if (integer? <value>) returns true.
+;;  (symbol? y))
 (defsynrules fcase ()
   ((_ val (predicate body ...) ...)
    (let ((val val))
      (cond ((predicate val) body ...) ...
-	   (#t (error 'fcase "no-matching-clause" '(predicate ...) val))))))
+	   (#t (r6rs-error 'fcase
+			   "no-matching-clause" '(predicate ...) val))))))
 
 (define (reduce fun init list)
   (cond ((null? list) init)
@@ -774,6 +905,7 @@
 	  set1
 	  set2))
 
+;; Collect all variables that get bound in the segment BODY.
 (define (gather-vars body)
   (reduce (lambda (vars node)
 	    (fcase node
@@ -784,6 +916,7 @@
 	  '()
 	  body))
 
+;; Are we at a conditional claus that uses the "it" variable?
 (define (uses-it? ctx)
   (syntax-case (ctx-forms ctx) ()
     ((x y . __)
@@ -795,6 +928,20 @@
      #'y)
     (_ #f)))
 
+;; If-clauses are translated like so:
+;;
+;; (let ((joinpoint (lambda (<vars>) <rest>)))
+;;   (if <test>
+;;     (begin <true-segment>
+;;            (<joinpoint> <vars>)
+;;     (begin <false-segment>
+;;            (<joinpoint> <vars>)))
+;;
+;; <rest> is the code that comes after the if-clause.  <vars> is the
+;; union of variables that are bound in <true-segment> and
+;; <false-segment>.  The lambda "joinpoint" is used to properly bind
+;; variables in <rest>, e.g. if a collect clause occurs only in one
+;; arm of the if-clause.
 (define (if-clause ctx test)
   (let* ((old-body (ctx-body ctx))
 	 (and-selectable-clause* (lambda ()
@@ -896,6 +1043,8 @@
       (ctx-name-set! ctx name)))
    (#t #f)))
 
+;; Turn a list of nodes into s-expression. TAIL is the s-expression
+;; that should be executed after NODES.
 (define (rebuild-block nodes tail)
   (reduce (lambda (tail node)
 	    (fcase node
@@ -972,7 +1121,7 @@
 	    (cont (temp 'k))
 	    (ctx (make-ctx src #'loop-id #'(forms ...) cont #f
 			   finish-id epilog
-			   '() '() '() '() '() '() '() '() '())))
+			   '() '() '() '() '() '() '() '())))
        (maybe-name-clause ctx)
        (variable-clause* ctx)
        (main-clause* ctx)
@@ -1000,6 +1149,7 @@
 		     (ctx-tail ctx)
 		     #`(loop #,@(ctx-vars ctx))))))))))))
 
+;; FIXME: finish-loop doesn't work properly yet.
 (define (bind-loop-finish ctx body)
   #`(let ((#,(ctx-epilog ctx)
 	   (lambda (#,@(ctx-vars ctx))
@@ -1009,9 +1159,9 @@
       (let-syntax ((#,(ctx-finish ctx)
 		    (syntax-rules ()
 		      ((_) (#,(ctx-epilog ctx) #,@(ctx-vars ctx))))))
-	
 	#,body)))
 
+;; A simple-loop just binds the return continuation begins to loop.
 (define (simple-loop form)
   (syntax-case form ()
     ((loop-id forms ...)
@@ -1021,6 +1171,7 @@
 	  (begin forms ...)
 	  (loop))))))
 
+;; Is this a "simple" or an "extended" loop?
 (define (loop-simple? forms)
   (syntax-case forms ()
     (() #t)
