@@ -5,7 +5,7 @@
 ;;
 ;;;
 ;;
-;; The macro produces essentially output that looks so:
+;; The macro produces output that looks so:
 ;;
 ;;  (let (<with-bindings>)
 ;;    (let (<initialze iteration-variales>)
@@ -22,17 +22,16 @@
 ;; that are never set! can be stack allocated.)
 ;;
 ;; In a first step, input is transformed into a simple IR.  The IR
-;; consists of multiple "segments" that correspond to the above code;
-;; one segment binds the WITH-variables one segments initializes
-;; iteration-variables and so on.  Each segment is a list of
-;; "nodes". There are 4 kinds of nodes: bind, stmt, if-node, and
+;; consists of multiple "segments" that correspond to the above
+;; template; one segment binds the WITH-variables, one segments
+;; initializes iteration-variables and so on.  Each segment is a list
+;; of "nodes". There are 4 kinds of nodes: bind, stmt, if-node, and
 ;; test-nodes.  Bind-nodes bind variables like let; stmt-nodes are
 ;; used for side effects e.g. do-clauses; if-nodes are used to
-;; represent if-clauses; test-nodes are used to handle termination
-;; tests.
+;; represent if-clauses; test-nodes are used for termination tests.
 ;;
-;; In the second step, the IR segments are then converted to output
-;; expression.
+;; In the second step, the IR segments are then converted to the
+;; output expression.
 ;;
 ;; Many of the parsing functions here are named like the clauses in
 ;; the spec[*].  Those parse the input and generate IR as side effect.
@@ -158,18 +157,15 @@
   name 	    ; if we have a named-clause this is the name; #f otherwise
   finish    ; the identifier for the 'finish-loop macro
   epilog    ; the identifier for the epilogue lambda
-  finally   ; segment for finally forms
-  with 	    ; segment to setup initialize accumulators etc.
+  with 	    ; segment to setup accumulators etc.
   head 	    ; segment before the loop
   vars 	    ; list of identifiers that are rebound on each iteration
   neck 	    ; segment before body (currently not used)
   body 	    ; segment of the loop body
   tail 	    ; segment that binds loop vars for the next iteration
+  finally   ; segment for finally forms
   accus	    ; alist of accumulators
   )
-
-;; helper struct to parse for-as-arithmetic clauses
-(defstruct range ctx var type init limit test step by)
 
 ;; The IR nodes:
 (defstruct bind vars vals)
@@ -266,6 +262,9 @@
 ;; The from/to/by parts must be evaluated in the order as in the source.
 ;; So the initialization often create temporaries.
 
+;; helper struct to parse for-as-arithmetic clauses
+(defstruct range ctx var type init limit test step by)
+
 (define (range-error range msg form)
   (loop-error (range-ctx range) msg form))
 
@@ -351,13 +350,14 @@
     (emit-arithmetic ctx range)))
 
 
-;; Join to bind-nodes to one big bind-node.
+;; Create one big bind-node out of two binds.
 (define (join-binds bind1 bind2)
   (make-bind (append (bind-vars bind1) (bind-vars bind2))
 	     (append (bind-vals bind1) (bind-vals bind2))))
 
-;; Generate for destructuring-bind.  Return 2 values: a segment that
-;; binds auxiliary variables and as second value the final bind-node.
+;; Generate code for destructuring-bind.  Return 2 values: a segment
+;; that binds auxiliary variables and as second value the final
+;; bind-node.
 (define (d-bind var val)
   (syntax-case var ()
     (simple-var (identifier? var)
@@ -703,14 +703,14 @@
    ((return) (return-clause ctx (form)))))
 
 
-;; Info about accumulators are store ctx-accus slot.  It is an alist
-;; that maps names to accu structs.  #f is used to refer to the
-;; default accu.
+;; Info about accumulators are stored in the ctx-accus slot.  It is an
+;; alist that maps names to accu structs.  #f as name for the
+;; default/unnamed accu.
 
 ;; We use tail-concing for collect and friends.
 (defstruct list-accu head tail result)
 
-;; Numbers are accumulated into single variable.  For some cases
+;; Numbers are accumulated in a single variable.  For some cases
 ;; (e.g. maximize) we create an additional variable that indicates
 ;; whether the accu was initialized or not.
 (defstruct num-accu var flag)
@@ -927,9 +927,9 @@
 ;; (let ((joinpoint (lambda (<vars>) <rest>)))
 ;;   (if <test>
 ;;     (begin <true-segment>
-;;            (<joinpoint> <vars>)
+;;            (joinpoint <vars>)
 ;;     (begin <false-segment>
-;;            (<joinpoint> <vars>)))
+;;            (joinpoint <vars>)))
 ;;
 ;; <rest> is the code that comes after the if-clause.  <vars> is the
 ;; union of variables that are bound in <true-segment> and
@@ -1037,8 +1037,8 @@
       (ctx-name-set! ctx name)))
    (#t #f)))
 
-;; Turn a list of nodes into s-expression. TAIL is the s-expression
-;; that should be executed after NODES.
+;; Return the s-expression for a list of nodes.  TAIL is the
+;; s-expression that should be executed after NODES.
 (define (rebuild-block nodes tail)
   (reduce (lambda (tail node)
 	    (fcase node
@@ -1155,7 +1155,7 @@
 		      ((_) (#,(ctx-epilog ctx) #,@(ctx-vars ctx))))))
 	#,body)))
 
-;; A simple-loop just binds the return continuation begins to loop.
+;; A simple-loop just binds the return continuation and begins to loop.
 (define (simple-loop form)
   (syntax-case form ()
     ((loop-id forms ...)
