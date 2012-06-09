@@ -21,7 +21,7 @@
 (include "kloop-tests-8.scm")
 (include "kloop-tests-9.scm")
 (include "kloop-tests-10.scm")
-;;(include "kloop-tests-11.scm")
+(include "kloop-tests-11.scm")
 (include "kloop-tests-12.scm")
 
 (test-end "kloop-tests")
